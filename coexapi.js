@@ -1,38 +1,63 @@
-// Minimal client for the NovaStar COEX OpenAPI (HTTP, default port 8001).
-// Used for everything the @novastar-dev/coex library does not cover.
-// Endpoints and bodies follow https://api.coex.novastar.tech/en/
+// Client for the NovaStar COEX HTTP API (default port 8001).
+// Endpoints and bodies follow https://api.coex.novastar.tech/en/ (COEX 1.5.0).
+// Started from Hirte666's client in PR #55; replaces the @novastar-dev/coex library.
 
-class CoexApi {
+// Cabinet ids are 64-bit. JavaScript numbers lose precision above 2^53, so ids are
+// read as decimal strings and written back as exact JSON numbers.
+function parseExact(text) {
+	return JSON.parse(text, (_key, value, context) =>
+		typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value) ? context.source : value,
+	)
+}
+
+// A list of ids as exact JSON numbers. Accepts numbers or decimal strings.
+export function exactIds(list) {
+	return list.map((id) => (typeof id === 'string' && /^\d+$/.test(id) ? JSON.rawJSON(id) : id))
+}
+
+export class CoexError extends Error {
+	constructor(message, { code, locked = false } = {}) {
+		super(message)
+		this.code = code
+		this.locked = locked
+	}
+}
+
+export class CoexApi {
 	constructor(host, port) {
-		this.baseurl = `http://${host}:${port || 8001}`
+		this.host = host
+		this.port = Number(port) || 8001
+		this.baseurl = `http://${host}:${this.port}`
 		this.timeout = 4000
 	}
 
 	async request(method, path, body) {
-		const opts = { method, headers: {}, signal: AbortSignal.timeout(this.timeout) }
+		const headers = { 'Device-Key': `${this.host}:${this.port}` }
+		const opts = { method, headers, signal: AbortSignal.timeout(this.timeout) }
 		if (body !== undefined) {
-			opts.headers['Content-Type'] = 'application/json'
+			headers['Content-Type'] = 'application/json'
 			opts.body = JSON.stringify(body)
 		}
 		const res = await fetch(this.baseurl + path, opts)
+		const text = await res.text()
 		let data
 		try {
-			data = await res.json()
-		} catch (e) {
-			throw new Error(`${method} ${path}: HTTP ${res.status}, no JSON`)
+			data = parseExact(text)
+		} catch {
+			throw new CoexError(`${method} ${path}: HTTP ${res.status}, no JSON`)
 		}
 		if (data && typeof data === 'object' && 'code' in data) {
 			if (data.code && data.code !== 0 && data.code !== 200) {
 				const msg = data.message || `code ${data.code}`
-				const err = new Error(`${method} ${path}: ${msg}`)
-				if (msg === 'device locked') {
-					err.message += ' (VMP is connected from another PC - close VMP or run Companion on that PC)'
-				}
-				throw err
+				const locked = msg === 'device locked'
+				throw new CoexError(
+					`${method} ${path}: ${msg}${locked ? ' (VMP is connected to this controller; close VMP to control it from Companion)' : ''}`,
+					{ code: data.code, locked },
+				)
 			}
 			return data.data
 		}
-		if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status}`)
+		if (!res.ok) throw new CoexError(`${method} ${path}: HTTP ${res.status}`)
 		return data
 	}
 
@@ -47,17 +72,22 @@ class CoexApi {
 	}
 
 	// ---- Reads ----
-	async displayState() {
+	displayState() {
 		return this.get('/api/v1/screen/output/display/state')
 	}
 	async displayParams() {
 		const d = await this.get('/api/v1/screen/displayparams')
 		return Array.isArray(d) ? d : (d?.list ?? [])
 	}
+	// All presets with their screen, flattened: [{ ...preset, screenID }]
 	async presetList() {
 		const d = await this.get('/api/v1/preset')
 		if (Array.isArray(d)) return d
-		return d?.screenPresets?.[0]?.presets ?? []
+		const out = []
+		for (const sp of d?.screenPresets ?? []) {
+			for (const p of sp.presets ?? []) out.push({ ...p, screenID: p.screenID ?? sp.screenID })
+		}
+		return out
 	}
 	async sources() {
 		const d = await this.get('/api/v1/device/input/sources')
@@ -98,6 +128,27 @@ class CoexApi {
 	}
 	inputData() {
 		return this.get('/api/v1/device/input')
+	}
+
+	// ---- The original module's calls, same requests the library sent ----
+	// Display mode on every screen: PUT /screen/output/displaymode {value}
+	displayModeAll(value) {
+		return this.put('/api/v1/screen/output/displaymode', { value })
+	}
+	// Input for Send-Only mode: PUT /screen/layer/input {groupId}
+	layerInputGroup(groupId) {
+		return this.put('/api/v1/screen/layer/input', { groupId })
+	}
+	// Preset recall: POST /preset/current/update {sequenceNumber, screenID}
+	applyPreset(sequenceNumber, screenID) {
+		return this.post('/api/v1/preset/current/update', { sequenceNumber, screenID })
+	}
+	// Working mode per screen (0 Send-Only, 1 All-In-One). VMP sends the screen's
+	// other mode fields with it, so the caller passes them through unchanged.
+	screenMode(screen, workingMode) {
+		const body = { screenID: screen.screenID, workingMode }
+		for (const k of ['layoutMode', 'lowLatency', 'outputMode']) if (screen[k] !== undefined) body[k] = screen[k]
+		return this.put('/api/v1/screen/mode', body)
 	}
 
 	// ---- Screen / output ----
@@ -221,42 +272,44 @@ class CoexApi {
 		return this.put('/api/v1/device/snmpstate', { state })
 	}
 
-	// ---- Cabinets (receiving cards) ----
+	// ---- Cabinets (receiving cards); idList entries are exact 64-bit ids ----
 	noDataSignal(idList, prestoreImageType) {
-		return this.put('/api/v1/device/cabinet/prestoreimage', { idList, abnormalMode: 1, prestoreImageType })
+		return this.put('/api/v1/device/cabinet/prestoreimage', {
+			idList: exactIds(idList),
+			abnormalMode: 1,
+			prestoreImageType,
+		})
 	}
 	thermalOnOff(idList, enable) {
-		return this.put('/api/v1/device/correctionop/cabinets/thermacal/enable', { idList, enable })
+		return this.put('/api/v1/device/correctionop/cabinets/thermacal/enable', { idList: exactIds(idList), enable })
 	}
 	thermalAmount(idList, amount) {
-		return this.put('/api/v1/device/correctionop/cabinets/thermacal/amount', { idList, amount })
+		return this.put('/api/v1/device/correctionop/cabinets/thermacal/amount', { idList: exactIds(idList), amount })
 	}
 	thermalMode(idList, mode) {
-		return this.put('/api/v1/device/correctionop/cabinets/thermacal/mode', { idList, mode })
+		return this.put('/api/v1/device/correctionop/cabinets/thermacal/mode', { idList: exactIds(idList), mode })
 	}
 	cabinetRgbBrightness(idList, r, g, b) {
-		return this.put('/api/v1/device/cabinet/rgb/brightness', { idList, r, g, b })
+		return this.put('/api/v1/device/cabinet/rgb/brightness', { idList: exactIds(idList), r, g, b })
 	}
 	cabinetBrightness(idList, ratio, nit) {
-		const body = { idList, ratio }
+		const body = { idList: exactIds(idList), ratio }
 		if (nit !== undefined && nit !== null && nit !== '') body.nit = nit
 		return this.put('/api/v1/device/cabinet/brightness', body)
 	}
 	cabinetColorTemperature(idList, value) {
-		return this.put('/api/v1/device/cabinet/colortemperature', { idList, value })
+		return this.put('/api/v1/device/cabinet/colortemperature', { idList: exactIds(idList), value })
 	}
 	cabinetTestPattern(idList, testmode) {
-		return this.put('/api/v1/device/cabinet/testpattern', { idList, testmode })
+		return this.put('/api/v1/device/cabinet/testpattern', { idList: exactIds(idList), testmode })
 	}
 	cabinetMapping(idList, enable) {
-		return this.put('/api/v1/device/cabinet/mapping', { idList, enable })
+		return this.put('/api/v1/device/cabinet/mapping', { idList: exactIds(idList), enable })
 	}
 	cabinetMultiMode(idList, modeId) {
-		return this.put('/api/v1/device/cabinet/multimode', { idList, modeId })
+		return this.put('/api/v1/device/cabinet/multimode', { idList: exactIds(idList), modeId })
 	}
 	cabinetRgbw(idList, changeType, value) {
-		return this.post('/api/v1/device/cabinet/rgbwbrightness', { idList, changeType, value })
+		return this.post('/api/v1/device/cabinet/rgbwbrightness', { idList: exactIds(idList), changeType, value })
 	}
 }
-
-module.exports = CoexApi

@@ -239,7 +239,10 @@ function gamutNames(self) {
 		})
 		if (o.gamutList?.currentGamutName) names.add(o.gamutList.currentGamutName)
 	})
-	return [...names]
+	// Sorted: the controller returns this list in a different order on every poll
+	// (measured on the emulator). Unsorted, the definition signature changed every
+	// poll and every action, feedback and preset was re-pushed each time.
+	return [...names].sort()
 }
 
 function multiModeForScreen(self, screenId, index) {
@@ -254,12 +257,25 @@ function multiModes(self) {
 			if (!seen.has(mode.modeId)) seen.set(mode.modeId, mode.modeName || `Mode ${mode.modeId}`)
 		})
 	})
-	return [...seen.entries()].map(([id, label]) => ({ id, label }))
+	// Sorted for a stable definition signature (see gamutNames).
+	return [...seen.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => Number(a.id) - Number(b.id))
 }
 
 function scheduleForScreen(self, screenId, index) {
 	const list = arr(self.schedules)
 	return list.find((s) => s.screenId === screenId) || list[index]
+}
+
+// ---------- Presets ----------
+
+// Presets of one screen. The API lists presets per screen; presetList() flattens
+// them and tags each with its screenID.
+function presetsForScreen(self, screenId) {
+	return arr(self.presets).filter((p) => p.screenID === screenId)
+}
+
+function activePresetForScreen(self, screenId) {
+	return presetsForScreen(self, screenId).find((p) => p.state === true)
 }
 
 // ---------- Variables ----------
@@ -325,9 +341,12 @@ function buildVariables(self) {
 		}
 		const sch = scheduleForScreen(self, id, i)
 		if (sch) add(`screen_${i}_schedule`, `${L} Schedule`, onOff(sch.enable))
+		if (id !== undefined) add(`screen_${i}_preset`, `${L} Active Preset`, activePresetForScreen(self, id)?.name ?? '')
 	}
 
 	add('connected', 'Controller connected (1/0)', self.connected ? 1 : 0)
+	// Kept from the original module (v2.0.x), which defined this variable.
+	add('connection_status', 'Connection status', self.connectionLabel ?? (self.connected ? 'Connected' : 'Disconnected'))
 
 	// Preset / display state
 	add('current_preset_name', 'Current Preset Name', self.currentPresetName || 'Not Activated')
@@ -475,10 +494,11 @@ function buildVariables(self) {
 	return out
 }
 
-module.exports = {
+export {
 	INPUT_TYPES,
 	HDR_MODES,
 	BIT_DEPTHS,
+	DISPLAY_MODES,
 	displayModeName,
 	canvasStates,
 	inputHasSignal,
@@ -494,5 +514,7 @@ module.exports = {
 	multiModes,
 	scheduleForScreen,
 	inputPortConfig,
+	presetsForScreen,
+	activePresetForScreen,
 	buildVariables,
 }

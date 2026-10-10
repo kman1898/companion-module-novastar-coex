@@ -1,8 +1,10 @@
 {
+	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+	"type": "connection",
 	"id": "novastar-coex",
-	"name": "novastar-coex",
+	"name": "NovaStar COEX",
 	"shortname": "novastar-coex",
-	"description": "Companion module for NovaStar COEX/VMP devices (MX40 Pro, MX30, CX80 Pro).",
+	"description": "Control and monitor NovaStar COEX LED processors (MX6000 Pro, MX2000 Pro, MX40 Pro, MX30, MX20, KU20, KC40, CX40 Pro) over the COEX HTTP API.",
 	"version": "0.0.0",
 	"license": "MIT",
 	"repository": "git+https://github.com/bitfocus/companion-module-novastar-coex.git",
@@ -14,19 +16,13 @@
 		}
 	],
 	"runtime": {
-		"type": "node18",
+		"type": "node22",
 		"api": "nodejs-ipc",
 		"apiVersion": "0.0.0",
 		"entrypoint": "../main.js"
 	},
-	"legacyIds": [
-		"companion-module-novastar-coex"
-	],
+	"legacyIds": ["companion-module-novastar-coex"],
 	"manufacturer": "NovaStar Coex",
-	"products": [
-		"MX40 Pro",
-		"CX80 Pro",
-		"KU20"
-	],
-	"keywords": []
+	"products": ["MX6000 Pro", "MX2000 Pro", "MX40 Pro", "MX30", "MX20", "KU20", "KC40", "CX40 Pro", "CX80 Pro"],
+	"keywords": ["LED", "video wall", "processor", "VMP", "brightness", "blackout"]
 }

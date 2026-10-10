@@ -1,5 +1,5 @@
-const { combineRgb } = require('@companion-module/base')
-const state = require('./state')
+import { combineRgb } from '@companion-module/base'
+import * as state from './state.js'
 
 const RED = combineRgb(200, 0, 0)
 const GREEN = combineRgb(0, 140, 0)
@@ -25,7 +25,7 @@ function kelvinToRgb(kelvin) {
 	return combineRgb(Math.round(r), Math.round(g), Math.round(b))
 }
 
-module.exports = async function (self) {
+export default function (self) {
 	const screenOpt = (withAny = true) => ({
 		id: 'screen',
 		type: 'dropdown',
@@ -89,6 +89,27 @@ module.exports = async function (self) {
 			callback: (feedback) => self.currentPresetName === feedback.options.preset,
 		},
 
+		preset_active_screen: {
+			name: 'Preset is active (per screen)',
+			type: 'boolean',
+			defaultStyle: { bgcolor: BLUE, color: WHITE },
+			options: [
+				{
+					id: 'preset',
+					type: 'dropdown',
+					label: 'Preset',
+					default: self.screenPresetChoices()[0]?.id ?? '',
+					choices: self.screenPresetChoices(),
+					allowCustom: true,
+				},
+			],
+			callback: (feedback) => {
+				const [screenID, seq] = String(feedback.options.preset).split('|')
+				const active = state.activePresetForScreen(self, screenID)
+				return active !== undefined && String(active.sequenceNumber) === seq
+			},
+		},
+
 		brightness_compare: {
 			name: 'Screen brightness compare',
 			description: 'Compare the brightness (0-100 %) of a screen with a value',
@@ -126,13 +147,14 @@ module.exports = async function (self) {
 			name: 'Screen Color Temperature Display',
 			type: 'advanced',
 			description: 'Colors the button background like the current screen color temperature',
+			affectedProperties: ['bgcolor'],
 			options: [{ id: 'screenIndex', type: 'number', label: 'Screen Index (0-based)', default: 0, min: 0, max: 10 }],
 			callback: (feedback) => {
 				const p = self.displayParams?.[feedback.options.screenIndex]
 				if (!p || p.colorTemperature === undefined || p.colorTemperature === null) return {}
 				try {
 					return { bgcolor: kelvinToRgb(p.colorTemperature) }
-				} catch (e) {
+				} catch {
 					return {}
 				}
 			},
@@ -399,7 +421,7 @@ module.exports = async function (self) {
 			callback: (feedback) => {
 				const info = self.monitorInfo
 				if (!info) return false
-				let t = null
+				let t
 				if (feedback.options.source === 'mainboard') t = Number(info.mainBoardTemperature?.value)
 				else if (feedback.options.source === 'chips')
 					t = Math.max(...(info.temperatureInfos || []).map((x) => Number(x.temperature)).filter(Number.isFinite))

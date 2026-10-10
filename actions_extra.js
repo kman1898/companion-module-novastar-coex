@@ -1,5 +1,5 @@
-// Additional actions covering the rest of the COEX OpenAPI.
-const state = require('./state')
+// Additional actions covering the rest of the COEX OpenAPI (from Hirte666's PR #55).
+import * as state from './state.js'
 
 const ON_OFF = [
 	{ id: 'on', label: 'On' },
@@ -30,7 +30,7 @@ const RX_TEST_MODES = [
 	{ id: 13, label: 'Aging' },
 ]
 
-module.exports = function (self) {
+export default function (self) {
 	// ---- shared option builders ----
 	const screenOpt = () => ({
 		id: 'screen',
@@ -72,11 +72,9 @@ module.exports = function (self) {
 	})
 	const resolveOnOff = (value, current) => (value === 'toggle' ? !current : value === 'on')
 
-	const cabinets = async (event, context) => {
-		let text = event.options.cabinets
-		if (context && typeof context.parseVariablesInString === 'function')
-			text = await context.parseVariablesInString(text)
-		const ids = self.resolveCabinets(text)
+	// Options with useVariables arrive already parsed in API 2.x.
+	const cabinets = async (event) => {
+		const ids = self.resolveCabinets(event.options.cabinets)
 		if (!ids.length) throw new Error('No cabinet IDs (cabinet list not loaded yet?)')
 		return ids
 	}
@@ -652,12 +650,8 @@ module.exports = function (self) {
 		controller_name: {
 			name: 'Controller name',
 			options: [{ id: 'name', type: 'textinput', label: 'Name', default: '', useVariables: true }],
-			callback: async (e, context) => {
-				const name = context?.parseVariablesInString
-					? await context.parseVariablesInString(e.options.name)
-					: e.options.name
-				return self.run('Controller name', (api) => api.controllerName(String(name).slice(0, 255)))
-			},
+			callback: (e) =>
+				self.run('Controller name', (api) => api.controllerName(String(e.options.name ?? '').slice(0, 255))),
 		},
 
 		snmp_onoff: {
