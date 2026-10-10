@@ -213,7 +213,20 @@ export default function (self) {
 			options: [screenOpt(), { id: 'value', type: 'number', label: 'Kelvin', default: 6500, min: 1700, max: 15000 }],
 			callback: (e) =>
 				self.run('Color temperature', (api) =>
-					api.colorTemperature(Number(e.options.value), self.resolveScreens(e.options.screen)),
+					self.setColour(api, 'ct', Number(e.options.value), self.resolveScreens(e.options.screen)),
+				),
+		},
+
+		colortemp_step: {
+			name: 'Color Temperature +/- (per screen)',
+			description: 'Steps from the current value; quick presses add up',
+			options: [
+				screenOpt(),
+				{ id: 'step', type: 'number', label: 'Step (K, negative = warmer)', default: 100, min: -5000, max: 5000 },
+			],
+			callback: (e) =>
+				self.run('Color temperature step', (api) =>
+					self.stepColour(api, 'ct', self.resolveScreens(e.options.screen), Number(e.options.step)),
 				),
 		},
 
@@ -221,7 +234,19 @@ export default function (self) {
 			name: 'Gamma (per screen)',
 			options: [screenOpt(), { id: 'value', type: 'number', label: 'Gamma', default: 2.8, min: 1, max: 4, step: 0.1 }],
 			callback: (e) =>
-				self.run('Gamma', (api) => api.gamma(Number(e.options.value), self.resolveScreens(e.options.screen))),
+				self.run('Gamma', (api) =>
+					self.setColour(api, 'gamma', Number(e.options.value), self.resolveScreens(e.options.screen)),
+				),
+		},
+
+		gamma_step: {
+			name: 'Gamma +/- (per screen)',
+			description: 'Steps from the current value; quick presses add up',
+			options: [screenOpt(), { id: 'step', type: 'number', label: 'Step', default: 0.1, min: -3, max: 3, step: 0.1 }],
+			callback: (e) =>
+				self.run('Gamma step', (api) =>
+					self.stepColour(api, 'gamma', self.resolveScreens(e.options.screen), Number(e.options.step)),
+				),
 		},
 
 		brightness_limit_onoff: {

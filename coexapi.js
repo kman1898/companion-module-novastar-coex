@@ -15,6 +15,36 @@ export function exactIds(list) {
 	return list.map((id) => (typeof id === 'string' && /^\d+$/.test(id) ? JSON.rawJSON(id) : id))
 }
 
+// NovaStar's error codes (https://api.coex.novastar.tech/en/, "Error Codes")
+const ERROR_CODES = {
+	1: 'Invalid parameters',
+	2: 'Failed to send',
+	3: 'Internal error',
+	4: 'Failed to parse data',
+	5: 'Device busy',
+	6: 'Feature not supported',
+	7: 'Parameter length error',
+	10: 'Failed to open file',
+	11: 'Failed to close file',
+	12: 'Readback failed',
+	13: 'Failed to create directory',
+	14: 'Failed to read file',
+	15: 'Failed to decode',
+	16: 'Failed to encode',
+	17: 'Failed to write file',
+	18: 'Request timeout',
+	19: 'Response error',
+	26: 'Failed to serialize data',
+	27: 'Feature conflict due to a conditional restriction',
+	29: 'Conflicts with low latency',
+	30: 'Conflicts with 3D',
+	31: 'Conflicts with genlock',
+	32: 'Conflicts with additional frame delay',
+	33: 'Conflicts with frame multiplication',
+	34: 'Screen Y positions differ, needed for low latency',
+	35: 'No screen layout configured',
+}
+
 export class CoexError extends Error {
 	constructor(message, { code, locked = false } = {}) {
 		super(message)
@@ -48,8 +78,9 @@ export class CoexApi {
 		}
 		if (data && typeof data === 'object' && 'code' in data) {
 			if (data.code && data.code !== 0 && data.code !== 200) {
-				const msg = data.message || `code ${data.code}`
-				const locked = msg === 'device locked'
+				const known = ERROR_CODES[data.code]
+				const msg = (data.message || `code ${data.code}`) + (known && known !== data.message ? ` (${known})` : '')
+				const locked = data.message === 'device locked'
 				throw new CoexError(
 					`${method} ${path}: ${msg}${locked ? ' (VMP is connected to this controller; close VMP to control it from Companion)' : ''}`,
 					{ code: data.code, locked },

@@ -5,6 +5,7 @@ import UpdateFeedbacks from './feedbacks.js'
 import UpdatePresets from './presets.js'
 import { CoexApi } from './coexapi.js'
 import { PushChannel } from './push.js'
+import { generateOfflineData, createOfflineApi } from './offline.js'
 import * as state from './state.js'
 
 // What gets polled how often. "every" is in poll ticks; "everyMs" is converted to
@@ -61,6 +62,13 @@ export default class ModuleInstance extends InstanceBase {
 		this.variableIdSignature = ''
 		this.brightnessPending = {}
 		this.rampTimers = {}
+		this.colourPending = { ct: {}, gamma: {} }
+		this.writeQueues = {}
+		this.target = 'primary'
+		this.screenOrders = {}
+		this.primaryProbeOk = 0
+		this.lastPrimaryProbe = 0
+		this.api = null
 	}
 
 	// ---- Brightness: stepping, ramping, and holding our value against the poll ----
@@ -84,11 +92,20 @@ export default class ModuleInstance extends InstanceBase {
 		return this.polledBrightness(screenId)
 	}
 
+	// Writes of one kind go out one at a time, in press order. Concurrent HTTP
+	// requests can overtake each other (seen on the emulator: three quick steps
+	// arrived as 5300, 5100, 5200), which would leave the wall on a stale value.
+	serialWrite(kind, fn) {
+		const run = (this.writeQueues[kind] ?? Promise.resolve()).then(fn, fn)
+		this.writeQueues[kind] = run.catch(() => {})
+		return run
+	}
+
 	// Set brightness (0..1) on screens, remembering it as in flight
 	async setBrightness(api, value, screenIds) {
 		const v = Math.round(Math.max(0, Math.min(1, value)) * 1000) / 1000
 		for (const id of screenIds) this.brightnessPending[id] = { target: v, expires: Date.now() + BRIGHTNESS_SETTLE_MS }
-		await api.brightness(v, screenIds)
+		await this.serialWrite('brightness', () => api.brightness(v, screenIds))
 		this.checkVariables()
 		this.checkFeedbacks('brightness_compare')
 	}
@@ -132,6 +149,36 @@ export default class ModuleInstance extends InstanceBase {
 		delete this.rampTimers[key]
 	}
 
+	// ---- Colour temperature and gamma steps, same idea as brightness ----
+
+	// kind: 'ct' (Kelvin) or 'gamma'. Our value while a write is in flight, else polled.
+	colourFor(kind, screenId) {
+		const key = kind === 'ct' ? 'colorTemperature' : 'gamma'
+		const p = (this.displayParams || []).find((x) => x.screenId === screenId)
+		const polled = typeof p?.[key] === 'number' ? p[key] : undefined
+		const pending = this.colourPending[kind][screenId]
+		if (pending) {
+			if (Date.now() < pending.expires && polled !== pending.target) return pending.target
+			delete this.colourPending[kind][screenId]
+		}
+		return polled
+	}
+
+	async setColour(api, kind, value, screenIds) {
+		const v = kind === 'ct' ? clampKelvin(value) : clampGamma(value)
+		for (const id of screenIds) this.colourPending[kind][id] = { target: v, expires: Date.now() + BRIGHTNESS_SETTLE_MS }
+		await this.serialWrite(kind, () => (kind === 'ct' ? api.colorTemperature(v, screenIds) : api.gamma(v, screenIds)))
+		this.checkVariables()
+		this.checkFeedbacks('colortemp_is', 'gamma_is')
+	}
+
+	async stepColour(api, kind, screenIds, step) {
+		for (const id of screenIds) {
+			const cur = this.colourFor(kind, id) ?? (kind === 'ct' ? 6500 : 2.8)
+			await this.setColour(api, kind, cur + Number(step), [id])
+		}
+	}
+
 	// ---- Display mode per screen (a screen's canvases) ----
 
 	// 0 normal, 1 blackout, 2 freeze; blackout wins over freeze if canvases differ
@@ -161,11 +208,12 @@ export default class ModuleInstance extends InstanceBase {
 		this.checkVariables()
 
 		if (config?.offline) {
-			this.generateOfflineData()
+			generateOfflineData(this)
+			this.api = createOfflineApi(this)
 			this.connectionLabel = 'Offline programming'
-			this.setStatus(InstanceStatus.Ok, 'Offline programming (nothing is sent)')
+			this.setStatus(InstanceStatus.Ok, 'Offline programming (simulated controller, nothing is sent)')
 			this.onDataChanged()
-			this.log('info', 'Offline programming mode: building buttons against a virtual controller')
+			this.log('info', 'Offline programming mode: buttons work against a simulated controller, nothing is sent')
 			return
 		}
 
@@ -175,21 +223,59 @@ export default class ModuleInstance extends InstanceBase {
 		}
 
 		this.setStatus(InstanceStatus.Connecting)
-		this.api = new CoexApi(config.host, config.port)
-		if (config.usePush !== false) {
-			this.push = new PushChannel({
-				host: config.host,
-				port: config.port,
-				appId: `Companion_${this.id}`,
-				onEvent: (ev) => this.onPushEvent(ev),
-				log: (level, msg) => this.log(level, msg),
-			})
-		}
+		this.connectTo('primary')
 
 		// Polling also does the (re)connecting: if the controller is off or
 		// rebooting, the status shows a failure and recovers on its own.
 		this.pollAll(true).catch(() => {})
 		this.pollTimer = setInterval(() => this.pollAll(false).catch(() => {}), this.pollIntervalMs)
+	}
+
+	get backupHost() {
+		const h = String(this.config?.backupHost ?? '').trim()
+		return h && h !== this.config?.host ? h : ''
+	}
+
+	// Point the API and the push channel at the primary or the backup controller
+	connectTo(target) {
+		this.target = target
+		const host = target === 'backup' ? this.backupHost : this.config.host
+		this.api = new CoexApi(host, this.config.port)
+		if (this.push) this.push.stop()
+		this.push = null
+		if (this.config.usePush !== false) {
+			this.push = new PushChannel({
+				host,
+				port: this.config.port,
+				appId: `Companion_${this.id}`,
+				onEvent: (ev) => this.onPushEvent(ev),
+				log: (level, msg) => this.log(level, msg),
+			})
+		}
+		this.failCount = {}
+		this.unsupported.clear()
+	}
+
+	// While on the backup, check the primary now and then and go back to it once
+	// it has answered three checks in a row (about 30 s), so a flapping primary
+	// does not bounce control back and forth.
+	async probePrimary() {
+		if (this.target !== 'backup' || Date.now() - this.lastPrimaryProbe < 10000) return
+		this.lastPrimaryProbe = Date.now()
+		try {
+			await new CoexApi(this.config.host, this.config.port).displayState()
+			this.primaryProbeOk++
+		} catch {
+			this.primaryProbeOk = 0
+		}
+		if (this.primaryProbeOk >= 3) {
+			this.primaryProbeOk = 0
+			this.log('info', `Primary controller ${this.config.host} is answering again, switching back to it`)
+			this.connected = false
+			this.connectTo('primary')
+			this.pollBusy = false
+			await this.pollAll(true)
+		}
 	}
 
 	stopAll() {
@@ -223,7 +309,7 @@ export default class ModuleInstance extends InstanceBase {
 	}
 
 	async pollAll(force) {
-		if (!this.api || (this.pollBusy && !force)) return
+		if (!this.api || this.config?.offline || (this.pollBusy && !force)) return
 		this.pollBusy = true
 		try {
 			const n = this.pollCount++
@@ -286,14 +372,29 @@ export default class ModuleInstance extends InstanceBase {
 				} else if (fastOk > 0 && !this.connected) {
 					this.connected = true
 					this.locked = false
-					this.connectionLabel = 'Connected'
 					this.unsupported.clear()
-					this.log('info', 'Connected to controller')
-					this.setStatus(InstanceStatus.Ok)
+					if (this.target === 'backup') {
+						this.connectionLabel = 'Connected (backup)'
+						this.log('warn', `Connected to the backup controller ${this.backupHost}`)
+						this.setStatus(InstanceStatus.UnknownWarning, 'On the backup controller: the primary is not answering')
+					} else {
+						this.connectionLabel = 'Connected'
+						this.log('info', 'Connected to controller')
+						this.setStatus(InstanceStatus.Ok)
+					}
 					if (this.push) this.push.start()
+					this.checkVariables()
 					// fetch the rest right away instead of waiting for the slow tiers
 					this.pollBusy = false
 					return this.pollAll(true)
+				}
+
+				// Failover: after a failed attempt try the other controller next time.
+				// Not when VMP holds the lock: the controller is up, just busy.
+				if (fastOk === 0 && !this.connected && this.backupHost && !lockedSeen) {
+					const next = this.target === 'primary' ? 'backup' : 'primary'
+					this.log('info', `No answer from the ${this.target} controller, trying the ${next}`)
+					this.connectTo(next)
 				}
 			}
 
@@ -301,6 +402,7 @@ export default class ModuleInstance extends InstanceBase {
 		} finally {
 			this.pollBusy = false
 		}
+		if (this.connected && this.target === 'backup') this.probePrimary().catch(() => {})
 	}
 
 	// Called after any polled data changed
@@ -317,6 +419,11 @@ export default class ModuleInstance extends InstanceBase {
 		this.currentPresetName = active ? active.name : 'Not Activated'
 		this.sourcelist = this.inputs.map((s) => ({ id: s.name, label: s.name }))
 		this.presetlist = firstPresets.map((p) => ({ id: p.name, label: p.name }))
+
+		// Remember each controller's screen order, so a button made on one of a
+		// primary/backup pair finds the same screen on the other (see resolveScreenId)
+		const order = state.allScreenIds(this)
+		if (this.connected && order.length) this.screenOrders[this.target] = order
 
 		// Dropdown contents changed -> rebuild actions/feedbacks/presets
 		const sig = JSON.stringify([
@@ -402,9 +509,17 @@ export default class ModuleInstance extends InstanceBase {
 	// programming mode uses those, because real screen ids are GUIDs the controller
 	// makes up; positional ids keep offline-built buttons working once connected.
 	resolveScreenId(value) {
+		const ids = state.allScreenIds(this)
 		const m = /^#(\d+)$/.exec(String(value ?? ''))
-		if (!m) return value
-		return state.allScreenIds(this)[Number(m[1]) - 1] ?? value
+		if (m) return ids[Number(m[1]) - 1] ?? value
+		if (value === undefined || value === null || ids.includes(value)) return value
+		// A screen id from the other controller of a primary/backup pair: the two
+		// make up their own screen ids, so match by position.
+		for (const order of Object.values(this.screenOrders)) {
+			const i = order.indexOf(value)
+			if (i >= 0 && ids[i] !== undefined) return ids[i]
+		}
+		return value
 	}
 
 	// Resolve an action's screen option to a screen ID list
@@ -428,53 +543,17 @@ export default class ModuleInstance extends InstanceBase {
 		return t.split(/[\s,;]+/).filter((s) => /^\d+$/.test(s))
 	}
 
-	// Offline programming: a virtual controller so buttons can be built without
-	// hardware. Screens use positional ids ("#1", "#2") so the buttons still find
-	// the right screen once connected to a real controller (see resolveScreenId).
-	generateOfflineData() {
-		const nScreens = Math.max(1, Math.min(8, Number(this.config.offlineScreens) || 1))
-		const nInputs = Math.max(1, Math.min(16, Number(this.config.offlineInputs) || 4))
-		const nPresets = Math.max(0, Math.min(32, Number(this.config.offlinePresets ?? 8)))
-		this.inputs = Array.from({ length: nInputs }, (_, i) => ({
-			id: i,
-			groupId: 100 + i,
-			name: `Input ${i + 1}`,
-			type: 3,
-			sourceStatus: 1,
-			actualResolution: { width: 1920, height: 1080 },
-			actualRefreshRate: 60,
-		}))
-		const screens = Array.from({ length: nScreens }, (_, i) => ({
-			screenID: `#${i + 1}`,
-			screenName: `Screen ${i + 1}`,
-			workingMode: 1,
-			masterFrameRate: 60,
-			canvases: [{ canvasID: 2048 + i }],
-			layersInWorkingMode: [{ workingMode: 1, layers: [{ id: 1, source: this.inputs[i % nInputs].groupId }] }],
-		}))
-		this.screenInfo = { screens }
-		this.displayParams = screens.map((s) => ({
-			screenId: s.screenID,
-			brightness: 1,
-			colorTemperature: 6500,
-			gamma: 2.8,
-		}))
-		this.displayState = { displayState: screens.map((s) => ({ canvasID: s.canvases[0].canvasID, displayMode: 0 })) }
-		this.presets = screens.flatMap((s) =>
-			Array.from({ length: nPresets }, (_, p) => ({
-				name: `Preset ${p + 1}`,
-				sequenceNumber: p + 1,
-				state: false,
-				screenID: s.screenID,
-			})),
-		)
-		this.deviceInfo = { name: 'Virtual controller', customName: 'Offline programming' }
-	}
-
 	// Run an API call from an action, log errors, and refresh state soon after
 	async run(label, fn) {
 		if (this.config?.offline) {
-			this.log('info', `Offline programming: "${label}" not sent`)
+			// The simulated controller applies the change; nothing is sent
+			try {
+				await fn(this.api)
+				this.log('debug', `${label}: simulated (offline programming)`)
+			} catch (err) {
+				this.log('error', `${label} failed: ${errText(err)}`)
+			}
+			this.onDataChanged()
 			return
 		}
 		if (!this.api) {
@@ -526,6 +605,13 @@ export default class ModuleInstance extends InstanceBase {
 				default: '8001',
 			},
 			{
+				type: 'textinput',
+				id: 'backupHost',
+				label: 'Backup controller IP (optional): control switches to it when the primary stops answering',
+				width: 12,
+				default: '',
+			},
+			{
 				type: 'number',
 				id: 'pollInterval',
 				label: 'Poll interval (ms)',
@@ -549,9 +635,17 @@ export default class ModuleInstance extends InstanceBase {
 				default: true,
 			},
 			{
+				type: 'static-text',
+				id: 'offline_heading',
+				label: 'Offline programming',
+				width: 12,
+				value:
+					'Build and test buttons without a controller. The module simulates a COEX with the screens, inputs and presets below: buttons change the simulated controller, so feedbacks light and variables move as they would on the real one. Nothing is sent. Turn it off to connect; buttons built offline for Screen 1 control the real first screen.',
+			},
+			{
 				type: 'checkbox',
 				id: 'offline',
-				label: 'Offline programming mode: build buttons against a virtual controller, nothing is sent',
+				label: 'Offline programming mode (simulated controller, nothing is sent)',
 				width: 12,
 				default: false,
 			},
@@ -587,6 +681,15 @@ export default class ModuleInstance extends InstanceBase {
 			},
 		]
 	}
+}
+
+// NovaStar's documented ranges. The controller answers Success to values outside
+// them: on VMP 1.5.1's emulator a gamma of 5 was ignored, while 1000 K was stored.
+function clampKelvin(v) {
+	return Math.round(Math.max(1700, Math.min(15000, Number(v) || 6500)))
+}
+function clampGamma(v) {
+	return Math.round(Math.max(1, Math.min(4, Number(v) || 2.8)) * 100) / 100
 }
 
 function errText(err) {

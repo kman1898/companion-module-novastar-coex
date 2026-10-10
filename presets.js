@@ -128,7 +128,68 @@ export default function (self) {
 	])
 	section('status', 'Status', [
 		group('status', 'Status', ['display_status', 'device_health', 'cabinet_status', 'connection']),
+		group('monitoring', 'Monitoring', ['fans', 'inputs_signal', 'backup_status', 'controller_info', 'uptime']),
 	])
+
+	presets.fans = {
+		type: 'simple',
+		name: 'Slowest fan (orange below 500 RPM)',
+		style: {
+			text: `FANS
+${v('fan_min_speed')} rpm`,
+			size: '14',
+			color: WHITE,
+			bgcolor: DARK_GREEN,
+		},
+		steps: NO_STEPS,
+		feedbacks: [{ feedbackId: 'fan_below', options: { rpm: 500 }, style: { bgcolor: ORANGE, color: BLACK } }],
+	}
+	presets.inputs_signal = {
+		type: 'simple',
+		name: 'Inputs with signal',
+		style: {
+			text: `INPUTS
+${v('inputs_with_signal')} live`,
+			size: '14',
+			color: WHITE,
+			bgcolor: GREY,
+		},
+		steps: NO_STEPS,
+		feedbacks: [{ feedbackId: 'any_input_signal', options: {}, style: { bgcolor: DARK_GREEN, color: WHITE } }],
+	}
+	presets.backup_status = {
+		type: 'simple',
+		name: 'Primary / backup state (red on a failure)',
+		style: { text: v('backup_status'), size: '7', color: WHITE, bgcolor: GREY },
+		steps: NO_STEPS,
+		feedbacks: [{ feedbackId: 'backup_problem', options: { what: 'any' }, style: { bgcolor: RED, color: WHITE } }],
+	}
+	presets.controller_info = {
+		type: 'simple',
+		name: 'Controller model and firmware',
+		style: {
+			text: `${v('device_model')}
+${v('device_firmware')}`,
+			size: '14',
+			color: WHITE,
+			bgcolor: GREY,
+		},
+		steps: NO_STEPS,
+		feedbacks: [],
+	}
+	presets.uptime = {
+		type: 'simple',
+		name: 'Controller uptime',
+		style: {
+			text: `UPTIME
+${v('device_runtime')}`,
+			size: '14',
+			color: WHITE,
+			bgcolor: GREY,
+		},
+		steps: NO_STEPS,
+		feedbacks: [],
+	}
 
 	// ---------- All screens: hold-to-fire for the dangerous global actions ----------
 	presets.blackout_all_hold = {
@@ -337,6 +398,110 @@ export default function (self) {
 		screenGroups.push(group(`screen_${si}`, screen.label, ids))
 	})
 	section('screens', 'Screens', screenGroups)
+
+	// ---------- Colour per screen: temperature and gamma, lit at the current value ----------
+	const colourGroups = []
+	self.screenChoices().forEach((screen, si) => {
+		const ids = []
+		const add = (key, preset) => {
+			const id = `colour_${si}_${key}`
+			presets[id] = preset
+			ids.push(id)
+		}
+		const name = `$(${self.label}:screen_${si}_name)`
+		const ct = `$(${self.label}:screen_${si}_colortemp)`
+		const gamma = `$(${self.label}:screen_${si}_gamma)`
+		const lit = combineRgb(0, 110, 50)
+
+		add('display', {
+			type: 'simple',
+			name: `${screen.label}: Colour temperature and gamma (tinted like the white point)`,
+			style: {
+				text: `${name}
+${ct}
+γ ${gamma}`,
+				size: '14',
+				color: BLACK,
+				bgcolor: GREY,
+			},
+			steps: NO_STEPS,
+			feedbacks: [{ feedbackId: 'screen_color_temperature_display', options: { screenIndex: si } }],
+		})
+		for (const [key, step, label] of [
+			['ct_down', -100, 'WARMER'],
+			['ct_up', 100, 'COOLER'],
+		]) {
+			add(key, {
+				type: 'simple',
+				name: `${screen.label}: Colour temperature ${step > 0 ? '+' : ''}${step} K`,
+				style: {
+					text: `${name}
+${label}
+${ct}`,
+					size: '14',
+					color: WHITE,
+					bgcolor: GREY,
+				},
+				steps: [{ down: [{ actionId: 'colortemp_step', options: { screen: screen.id, step } }], up: [] }],
+				feedbacks: [],
+			})
+		}
+		for (const kelvin of [3200, 4300, 5600, 6500, 7500, 9300]) {
+			add(`ct_${kelvin}`, {
+				type: 'simple',
+				name: `${screen.label}: ${kelvin} K`,
+				style: {
+					text: `${name}
+${kelvin}K`,
+					size: '14',
+					color: WHITE,
+					bgcolor: GREY,
+				},
+				steps: [{ down: [{ actionId: 'colortemp_screen', options: { screen: screen.id, value: kelvin } }], up: [] }],
+				feedbacks: [
+					{ feedbackId: 'colortemp_is', options: { screen: screen.id, kelvin }, style: { bgcolor: lit, color: WHITE } },
+				],
+			})
+		}
+		for (const [key, step] of [
+			['gamma_down', -0.1],
+			['gamma_up', 0.1],
+		]) {
+			add(key, {
+				type: 'simple',
+				name: `${screen.label}: Gamma ${step > 0 ? '+' : ''}${step}`,
+				style: {
+					text: `${name}
+γ ${step > 0 ? '+' : '-'}
+${gamma}`,
+					size: '14',
+					color: WHITE,
+					bgcolor: GREY,
+				},
+				steps: [{ down: [{ actionId: 'gamma_step', options: { screen: screen.id, step } }], up: [] }],
+				feedbacks: [],
+			})
+		}
+		for (const g of [2.2, 2.4, 2.6, 2.8]) {
+			add(`gamma_${String(g).replace('.', '_')}`, {
+				type: 'simple',
+				name: `${screen.label}: Gamma ${g}`,
+				style: {
+					text: `${name}
+γ ${g}`,
+					size: '14',
+					color: WHITE,
+					bgcolor: GREY,
+				},
+				steps: [{ down: [{ actionId: 'gamma_screen', options: { screen: screen.id, value: g } }], up: [] }],
+				feedbacks: [
+					{ feedbackId: 'gamma_is', options: { screen: screen.id, gamma: g }, style: { bgcolor: lit, color: WHITE } },
+				],
+			})
+		}
+		colourGroups.push(group(`colour_${si}`, screen.label, ids))
+	})
+	section('colour', 'Colour', colourGroups)
 
 	// ---------- Test patterns, each button in its own colour ----------
 	const tpIds = []

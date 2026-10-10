@@ -27,6 +27,19 @@ const WORKING_MODES = { 0: 'Send-Only', 1: 'All-In-One' }
 const DEVICE_MODES = { 1: 'Fiber converter', 2: 'Sending card', 3: 'All-in-one' }
 const UPDATE_STATES = { 0: 'Latest', 1: 'Update available', 2: 'Update (not direct)' }
 
+// Primary/backup state from /device/monitor/info backupStatus (NovaStar docs).
+// 108 is not documented; the emulator and LED-Logger's notes show it with no
+// backup configured.
+const BACKUP_STATES = {
+	108: 'No backup',
+	109: 'Primary in use, backup standby',
+	110: 'Primary in use, backup in use',
+	111: 'Primary in use, backup failed',
+	112: 'Primary failed, backup standby',
+	113: 'Primary failed, backup in use',
+	114: 'Primary failed, backup failed',
+}
+
 // Display mode codes, same as the library sends and the displaymode API documents:
 // 0 = Normal, 1 = Blackout, 2 = Freeze
 const DISPLAY_MODES = { 0: 'Normal', 1: 'Blackout', 2: 'Freeze' }
@@ -45,6 +58,22 @@ function formatRuntime(seconds) {
 	const h = Math.floor(s / 3600)
 	const m = Math.floor((s % 3600) / 60)
 	return `${h}:${String(m).padStart(2, '0')}`
+}
+
+// backupStatus is a number on some firmware and { status, errCode } on others
+// (VMP 1.5.1's controller returns the object, with the state code in errCode).
+function backupCode(info) {
+	const b = info?.backupStatus
+	if (b === undefined || b === null) return undefined
+	const code = typeof b === 'object' ? b.errCode : b
+	return Number.isFinite(Number(code)) ? Number(code) : undefined
+}
+
+function lowestFanSpeed(self) {
+	const speeds = arr(self.monitorInfo?.fanInfos)
+		.map((f) => Number(f.fanSpeed ?? f.speed))
+		.filter(Number.isFinite)
+	return speeds.length ? Math.min(...speeds) : undefined
 }
 
 function displayModeName(code) {
@@ -302,12 +331,11 @@ function buildVariables(self) {
 			const pct = Math.round((b || 0) * 100)
 			add(`screen_${i}_brightness`, `${L} Brightness (%)`, `${pct}%`)
 			add(`screen_${i}_brightness_num`, `${L} Brightness (number 0-100)`, pct)
-			add(
-				`screen_${i}_colortemp`,
-				`${L} Color Temperature`,
-				p.colorTemperature !== undefined ? p.colorTemperature + 'K' : '',
-			)
-			add(`screen_${i}_gamma`, `${L} Gamma`, p.gamma)
+			const ct = typeof self.colourFor === 'function' ? self.colourFor('ct', id) : p.colorTemperature
+			const gm = typeof self.colourFor === 'function' ? self.colourFor('gamma', id) : p.gamma
+			add(`screen_${i}_colortemp`, `${L} Color Temperature`, ct !== undefined ? ct + 'K' : '')
+			add(`screen_${i}_colortemp_num`, `${L} Color Temperature (number, K)`, ct)
+			add(`screen_${i}_gamma`, `${L} Gamma`, gm === undefined ? '' : Math.round(Number(gm) * 100) / 100)
 		}
 		if (s) {
 			const dm = typeof self.screenDisplayMode === 'function' ? self.screenDisplayMode(s.screenID) : undefined
@@ -415,6 +443,7 @@ function buildVariables(self) {
 	add('device_total_runtime', 'Controller total runtime (h:mm)', formatRuntime(info?.totalRuntime))
 	add('mainboard_temp', 'Mainboard Temperature (°C)', round1(info?.mainBoardTemperature?.value))
 	add('mainboard_voltage', 'Mainboard Voltage (V)', round1(info?.mainBoardVoltage?.value))
+	add('fan_min_speed', 'Slowest fan (RPM)', lowestFanSpeed(self))
 	arr(info?.fanInfos).forEach((f, i) =>
 		add(`fan_${i}_speed`, `Fan ${FAN_LABELS[f.fanType] ?? i + 1} Speed (RPM)`, f.fanSpeed ?? f.speed),
 	)
@@ -438,7 +467,9 @@ function buildVariables(self) {
 			HEALTH_LABELS[c.status] ?? c.status,
 		),
 	)
-	add('backup_status_code', 'Backup status (raw code from monitor)', info?.backupStatus)
+	const bc = backupCode(info)
+	add('backup_status_code', 'Backup status (raw code from monitor)', bc)
+	add('backup_status', 'Primary/backup state', bc === undefined ? '' : (BACKUP_STATES[bc] ?? `Code ${bc}`))
 
 	// Cabinets
 	const cab = cabinetHealth(self)
@@ -458,8 +489,9 @@ function buildVariables(self) {
 		add('device_model', 'Controller Model', hw.name)
 		add('device_custom_name', 'Controller Custom Name', hw.customName)
 		add('device_sn', 'Controller Serial Number', hw.sn)
-		add('device_firmware', 'Controller Firmware', hw.swVersion)
-		add('device_hw_version', 'Controller Hardware Version', hw.hwVersion)
+		// NovaStar's docs: hwVersion is the firmware version, swVersion the software version
+		add('device_firmware', 'Controller Firmware', hw.hwVersion || hw.swVersion)
+		add('device_sw_version', 'Controller Software Version', hw.swVersion)
 		add('device_ip', 'Controller IP', hw.ip)
 		add('device_mac', 'Controller MAC', hw.mac)
 		add('device_mode', 'Controller Mode', DEVICE_MODES[hw.mode] ?? hw.mode)
@@ -507,6 +539,9 @@ export {
 	HDR_MODES,
 	BIT_DEPTHS,
 	DISPLAY_MODES,
+	BACKUP_STATES,
+	backupCode,
+	lowestFanSpeed,
 	displayModeName,
 	canvasStates,
 	inputHasSignal,

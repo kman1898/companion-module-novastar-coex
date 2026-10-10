@@ -182,6 +182,29 @@ export default function (self) {
 			},
 		},
 
+		colortemp_is: {
+			name: 'Color temperature is…',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(0, 110, 50), color: WHITE },
+			options: [screenOpt(), { id: 'kelvin', type: 'number', label: 'Kelvin', default: 6500, min: 1700, max: 15000 }],
+			callback: (feedback) =>
+				screenIdsFor(feedback.options.screen).some(
+					(id) => Math.abs((self.colourFor('ct', id) ?? NaN) - Number(feedback.options.kelvin)) < 1,
+				),
+		},
+
+		gamma_is: {
+			name: 'Gamma is…',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(0, 110, 50), color: WHITE },
+			options: [screenOpt(), { id: 'gamma', type: 'number', label: 'Gamma', default: 2.8, min: 1, max: 4, step: 0.1 }],
+			// float32 on the controller: 2.2 can read back as 2.2000000476837
+			callback: (feedback) =>
+				screenIdsFor(feedback.options.screen).some(
+					(id) => Math.abs((self.colourFor('gamma', id) ?? NaN) - Number(feedback.options.gamma)) < 0.005,
+				),
+		},
+
 		// ---------- Inputs / layers ----------
 		input_signal: {
 			name: 'Input has signal',
@@ -451,6 +474,68 @@ export default function (self) {
 					t = Math.max(...(info.temperatureInfos || []).map((x) => Number(x.temperature)).filter(Number.isFinite))
 				else t = state.cabinetHealth(self).maxTemp
 				return Number.isFinite(t) && t > Number(feedback.options.temp)
+			},
+		},
+
+		fan_below: {
+			name: 'Fan slower than…',
+			description: 'True when any controller fan reports fewer RPM than you enter (e.g. a stopped fan)',
+			type: 'boolean',
+			defaultStyle: { bgcolor: ORANGE, color: BLACK },
+			options: [{ id: 'rpm', type: 'number', label: 'RPM', default: 500, min: 0, max: 20000 }],
+			callback: (feedback) => {
+				const slowest = state.lowestFanSpeed(self)
+				return slowest !== undefined && slowest < Number(feedback.options.rpm)
+			},
+		},
+
+		humidity_above: {
+			name: 'Cabinet humidity above…',
+			description: 'Highest humidity reported by any receiving card',
+			type: 'boolean',
+			defaultStyle: { bgcolor: ORANGE, color: BLACK },
+			options: [{ id: 'value', type: 'number', label: 'Humidity', default: 70, min: 0, max: 100 }],
+			callback: (feedback) => {
+				const h = state.cabinetHealth(self).maxHumidity
+				return h !== null && h > Number(feedback.options.value)
+			},
+		},
+
+		voltage_below: {
+			name: 'Receiving card voltage below…',
+			description: 'Lowest voltage reported by any receiving card',
+			type: 'boolean',
+			defaultStyle: { bgcolor: ORANGE, color: BLACK },
+			options: [{ id: 'volts', type: 'number', label: 'Volts', default: 4.5, min: 0, max: 30, step: 0.1 }],
+			callback: (feedback) => {
+				const v = state.cabinetHealth(self).minVoltage
+				return v !== null && v < Number(feedback.options.volts)
+			},
+		},
+
+		backup_problem: {
+			name: 'Primary / backup controller problem',
+			description: "From the controller's own primary/backup state (codes 111 to 114)",
+			type: 'boolean',
+			defaultStyle: { bgcolor: RED, color: WHITE },
+			options: [
+				{
+					id: 'what',
+					type: 'dropdown',
+					label: 'Trigger on',
+					default: 'any',
+					choices: [
+						{ id: 'any', label: 'Either controller failed' },
+						{ id: 'primary', label: 'Primary failed' },
+						{ id: 'backup', label: 'Backup failed' },
+					],
+				},
+			],
+			callback: (feedback) => {
+				const c = state.backupCode(self.monitorInfo)
+				if (feedback.options.what === 'primary') return c >= 112 && c <= 114
+				if (feedback.options.what === 'backup') return c === 111 || c === 114
+				return c >= 111 && c <= 114
 			},
 		},
 
