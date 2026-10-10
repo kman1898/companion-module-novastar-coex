@@ -30,6 +30,9 @@ const POLLS = [
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
+// How long a brightness we sent stays authoritative over the polled value.
+const BRIGHTNESS_SETTLE_MS = 2500
+
 export default class ModuleInstance extends InstanceBase {
 	constructor(internal) {
 		super(internal)
@@ -56,6 +59,93 @@ export default class ModuleInstance extends InstanceBase {
 		this.connectionLabel = 'Disconnected'
 		this.listSignature = ''
 		this.variableIdSignature = ''
+		this.brightnessPending = {}
+		this.rampTimers = {}
+	}
+
+	// ---- Brightness: stepping, ramping, and holding our value against the poll ----
+
+	// Polled brightness of a screen, 0..1, or undefined
+	polledBrightness(screenId) {
+		const p = (this.displayParams || []).find((x) => x.screenId === screenId)
+		return typeof p?.brightness === 'number' ? p.brightness : undefined
+	}
+
+	// The brightness to show and to step from: our own value while a write is in
+	// flight (the controller and the poll lag behind it), otherwise the polled one.
+	// Without this a held ramp fights the poll and visibly snaps back.
+	brightnessFor(screenId) {
+		const pending = this.brightnessPending[screenId]
+		if (pending) {
+			const polled = this.polledBrightness(screenId)
+			if (Date.now() < pending.expires && polled !== pending.target) return pending.target
+			delete this.brightnessPending[screenId]
+		}
+		return this.polledBrightness(screenId)
+	}
+
+	// Set brightness (0..1) on screens, remembering it as in flight
+	async setBrightness(api, value, screenIds) {
+		const v = Math.round(Math.max(0, Math.min(1, value)) * 1000) / 1000
+		for (const id of screenIds) this.brightnessPending[id] = { target: v, expires: Date.now() + BRIGHTNESS_SETTLE_MS }
+		await api.brightness(v, screenIds)
+		this.checkVariables()
+		this.checkFeedbacks('brightness_compare')
+	}
+
+	// One relative step (percent) on each screen, from its in-flight value
+	async stepBrightness(api, screenIds, stepPercent) {
+		for (const id of screenIds) {
+			const cur = this.brightnessFor(id) ?? 1
+			const next = Math.max(0, Math.min(100, Math.round(cur * 100) + Number(stepPercent))) / 100
+			await this.setBrightness(api, next, [id])
+		}
+	}
+
+	startRamp(screenIds, stepPercent, everyMs) {
+		const key = screenIds.join(',')
+		this.stopRamp(key)
+		const tick = () => this.stepBrightness(this.api, screenIds, stepPercent).catch(() => this.stopRamp(key))
+		tick()
+		const started = Date.now()
+		this.rampTimers[key] = setInterval(
+			() => {
+				// Failsafe: stop after 30 s in case a release is ever missed
+				if (Date.now() - started > 30000) return this.stopRamp(key)
+				const atEnd = screenIds.every((id) => {
+					const b = this.brightnessFor(id)
+					return stepPercent > 0 ? b >= 1 : b <= 0
+				})
+				if (atEnd) return this.stopRamp(key)
+				tick()
+			},
+			Math.max(50, Number(everyMs) || 150),
+		)
+	}
+
+	stopRamp(key) {
+		if (key === undefined) {
+			for (const k of Object.keys(this.rampTimers)) this.stopRamp(k)
+			return
+		}
+		clearInterval(this.rampTimers[key])
+		delete this.rampTimers[key]
+	}
+
+	// ---- Display mode per screen (a screen's canvases) ----
+
+	// 0 normal, 1 blackout, 2 freeze; blackout wins over freeze if canvases differ
+	screenDisplayMode(screenId) {
+		screenId = this.resolveScreenId(screenId)
+		const screen = state.screenList(this).find((s) => s.screenID === screenId)
+		const canvasIds = new Set((screen?.canvases ?? []).map((c) => c.canvasID))
+		const modes = (this.displayState?.displayState ?? [])
+			.filter((d) => canvasIds.has(d.canvasID))
+			.map((d) => d.displayMode)
+		if (!modes.length) return undefined
+		if (modes.includes(1)) return 1
+		if (modes.includes(2)) return 2
+		return 0
 	}
 
 	get pollIntervalMs() {
@@ -69,6 +159,15 @@ export default class ModuleInstance extends InstanceBase {
 
 		this.updateDefinitions()
 		this.checkVariables()
+
+		if (config?.offline) {
+			this.generateOfflineData()
+			this.connectionLabel = 'Offline programming'
+			this.setStatus(InstanceStatus.Ok, 'Offline programming (nothing is sent)')
+			this.onDataChanged()
+			this.log('info', 'Offline programming mode: building buttons against a virtual controller')
+			return
+		}
 
 		if (!config || !config.host) {
 			this.setStatus(InstanceStatus.BadConfig, 'No controller IP set')
@@ -94,6 +193,7 @@ export default class ModuleInstance extends InstanceBase {
 	}
 
 	stopAll() {
+		this.stopRamp()
 		if (this.pollTimer) {
 			clearInterval(this.pollTimer)
 			this.pollTimer = null
@@ -298,10 +398,19 @@ export default class ModuleInstance extends InstanceBase {
 		return this.inputs.map((s) => ({ id: String(s.groupId), label: s.name || `Group ${s.groupId}` }))
 	}
 
+	// Screen ids in options may be positional ("#1" = first screen). Offline
+	// programming mode uses those, because real screen ids are GUIDs the controller
+	// makes up; positional ids keep offline-built buttons working once connected.
+	resolveScreenId(value) {
+		const m = /^#(\d+)$/.exec(String(value ?? ''))
+		if (!m) return value
+		return state.allScreenIds(this)[Number(m[1]) - 1] ?? value
+	}
+
 	// Resolve an action's screen option to a screen ID list
 	resolveScreens(value) {
 		if (!value || value === 'all') return state.allScreenIds(this)
-		return [value]
+		return [this.resolveScreenId(value)]
 	}
 
 	// Resolve an input option ('all' or an id) to an input ID list
@@ -319,8 +428,55 @@ export default class ModuleInstance extends InstanceBase {
 		return t.split(/[\s,;]+/).filter((s) => /^\d+$/.test(s))
 	}
 
+	// Offline programming: a virtual controller so buttons can be built without
+	// hardware. Screens use positional ids ("#1", "#2") so the buttons still find
+	// the right screen once connected to a real controller (see resolveScreenId).
+	generateOfflineData() {
+		const nScreens = Math.max(1, Math.min(8, Number(this.config.offlineScreens) || 1))
+		const nInputs = Math.max(1, Math.min(16, Number(this.config.offlineInputs) || 4))
+		const nPresets = Math.max(0, Math.min(32, Number(this.config.offlinePresets ?? 8)))
+		this.inputs = Array.from({ length: nInputs }, (_, i) => ({
+			id: i,
+			groupId: 100 + i,
+			name: `Input ${i + 1}`,
+			type: 3,
+			sourceStatus: 1,
+			actualResolution: { width: 1920, height: 1080 },
+			actualRefreshRate: 60,
+		}))
+		const screens = Array.from({ length: nScreens }, (_, i) => ({
+			screenID: `#${i + 1}`,
+			screenName: `Screen ${i + 1}`,
+			workingMode: 1,
+			masterFrameRate: 60,
+			canvases: [{ canvasID: 2048 + i }],
+			layersInWorkingMode: [{ workingMode: 1, layers: [{ id: 1, source: this.inputs[i % nInputs].groupId }] }],
+		}))
+		this.screenInfo = { screens }
+		this.displayParams = screens.map((s) => ({
+			screenId: s.screenID,
+			brightness: 1,
+			colorTemperature: 6500,
+			gamma: 2.8,
+		}))
+		this.displayState = { displayState: screens.map((s) => ({ canvasID: s.canvases[0].canvasID, displayMode: 0 })) }
+		this.presets = screens.flatMap((s) =>
+			Array.from({ length: nPresets }, (_, p) => ({
+				name: `Preset ${p + 1}`,
+				sequenceNumber: p + 1,
+				state: false,
+				screenID: s.screenID,
+			})),
+		)
+		this.deviceInfo = { name: 'Virtual controller', customName: 'Offline programming' }
+	}
+
 	// Run an API call from an action, log errors, and refresh state soon after
 	async run(label, fn) {
+		if (this.config?.offline) {
+			this.log('info', `Offline programming: "${label}" not sent`)
+			return
+		}
 		if (!this.api) {
 			this.log('warn', `${label}: not connected`)
 			return
@@ -391,6 +547,43 @@ export default class ModuleInstance extends InstanceBase {
 				label: 'Instant updates from the controller (push channel; polling continues as a fallback)',
 				width: 12,
 				default: true,
+			},
+			{
+				type: 'checkbox',
+				id: 'offline',
+				label: 'Offline programming mode: build buttons against a virtual controller, nothing is sent',
+				width: 12,
+				default: false,
+			},
+			{
+				type: 'number',
+				id: 'offlineScreens',
+				label: 'Virtual screens',
+				width: 4,
+				default: 1,
+				min: 1,
+				max: 8,
+				isVisibleExpression: '$(options:offline)',
+			},
+			{
+				type: 'number',
+				id: 'offlineInputs',
+				label: 'Virtual inputs',
+				width: 4,
+				default: 4,
+				min: 1,
+				max: 16,
+				isVisibleExpression: '$(options:offline)',
+			},
+			{
+				type: 'number',
+				id: 'offlinePresets',
+				label: 'Virtual presets per screen',
+				width: 4,
+				default: 8,
+				min: 0,
+				max: 32,
+				isVisibleExpression: '$(options:offline)',
 			},
 		]
 	}

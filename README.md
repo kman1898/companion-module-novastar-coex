@@ -1,7 +1,5 @@
 # companion-module-novastar-coex
 
+A [Companion](https://github.com/bitfocus/companion) module to control and monitor NovaStar COEX LED processors (MX6000 Pro, MX2000 Pro, MX40 Pro, MX30, MX20, KU20, KC40, CX40 Pro) over the COEX HTTP API.
 
-A [Companion](https://github.com/bitfocus/companion) library for control of NovaStar COEX/VMP video wall processors such as MX40 Pro, KU20 & CX80 Pro.
-
-
-See [HELP.md](./companion/HELP.md) and [LICENSE](./LICENSE)
+Requires Companion 5.0 or later. See [HELP.md](./companion/HELP.md) and [LICENSE](./LICENSE).

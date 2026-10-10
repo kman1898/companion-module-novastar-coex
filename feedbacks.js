@@ -34,7 +34,7 @@ export default function (self) {
 		choices: withAny ? [{ id: 'all', label: 'Any screen' }, ...self.screenChoices()] : self.screenChoices(),
 		allowCustom: true,
 	})
-	const screenIdsFor = (value) => (!value || value === 'all' ? state.allScreenIds(self) : [value])
+	const screenIdsFor = (value) => (!value || value === 'all' ? state.allScreenIds(self) : [self.resolveScreenId(value)])
 
 	self.setFeedbackDefinitions({
 		// ---------- Display ----------
@@ -72,6 +72,28 @@ export default function (self) {
 			},
 		},
 
+		display_mode_screen: {
+			name: 'Display Mode is… (per screen)',
+			description: 'True when a screen is in the chosen mode (Blackout, Freeze or Normal), read from the controller',
+			type: 'boolean',
+			defaultStyle: { bgcolor: RED, color: WHITE },
+			options: [
+				screenOpt(false),
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Mode',
+					default: 1,
+					choices: [
+						{ id: 0, label: 'Normal' },
+						{ id: 1, label: 'Blackout' },
+						{ id: 2, label: 'Freeze' },
+					],
+				},
+			],
+			callback: (feedback) => self.screenDisplayMode(feedback.options.screen) === Number(feedback.options.mode),
+		},
+
 		preset_active: {
 			name: 'Preset is active',
 			type: 'boolean',
@@ -105,7 +127,7 @@ export default function (self) {
 			],
 			callback: (feedback) => {
 				const [screenID, seq] = String(feedback.options.preset).split('|')
-				const active = state.activePresetForScreen(self, screenID)
+				const active = state.activePresetForScreen(self, self.resolveScreenId(screenID))
 				return active !== undefined && String(active.sequenceNumber) === seq
 			},
 		},
@@ -135,7 +157,7 @@ export default function (self) {
 				const params = (self.displayParams || []).filter((p) => ids.includes(p.screenId) || ids.length === 0)
 				const v = Number(feedback.options.value)
 				return params.some((p) => {
-					const pct = Math.round((p.brightness || 0) * 100)
+					const pct = Math.round((self.brightnessFor(p.screenId) ?? p.brightness ?? 0) * 100)
 					if (feedback.options.op === 'gte') return pct >= v
 					if (feedback.options.op === 'lte') return pct <= v
 					return pct === v
@@ -213,7 +235,9 @@ export default function (self) {
 			callback: (feedback) => {
 				const input = state.findInput(self, feedback.options.input)
 				if (!input) return false
-				const want = String(feedback.options.layer || 'any')
+				// Resolve a positional screen ("#1|layer") from offline-built buttons
+				const [wantScreen, wantLayer] = String(feedback.options.layer || 'any').split('|')
+				const want = wantLayer === undefined ? wantScreen : `${self.resolveScreenId(wantScreen)}|${wantLayer}`
 				return state.screenList(self).some((s) =>
 					state.screenLayers(s).some((l) => {
 						if (want !== 'any' && want !== `${s.screenID}|${l.id}`) return false

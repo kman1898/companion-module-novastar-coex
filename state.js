@@ -297,7 +297,9 @@ function buildVariables(self) {
 		add(`screen_${i}_id`, `${L} ID`, id)
 		add(`screen_${i}_name`, `${L} Name`, s?.screenName)
 		if (p) {
-			const pct = Math.round((p.brightness || 0) * 100)
+			// brightnessFor: our in-flight value while the controller catches up
+			const b = typeof self.brightnessFor === 'function' ? (self.brightnessFor(id) ?? p.brightness) : p.brightness
+			const pct = Math.round((b || 0) * 100)
 			add(`screen_${i}_brightness`, `${L} Brightness (%)`, `${pct}%`)
 			add(`screen_${i}_brightness_num`, `${L} Brightness (number 0-100)`, pct)
 			add(
@@ -308,6 +310,12 @@ function buildVariables(self) {
 			add(`screen_${i}_gamma`, `${L} Gamma`, p.gamma)
 		}
 		if (s) {
+			const dm = typeof self.screenDisplayMode === 'function' ? self.screenDisplayMode(s.screenID) : undefined
+			add(
+				`screen_${i}_display_mode`,
+				`${L} Display Mode (Normal/Blackout/Freeze)`,
+				dm === undefined ? '' : displayModeName(dm),
+			)
 			add(`screen_${i}_working_mode`, `${L} Working Mode`, WORKING_MODES[s.workingMode] ?? s.workingMode)
 			add(`screen_${i}_frame_rate`, `${L} Master Frame Rate`, round1(s.masterFrameRate))
 			const layers = screenLayers(s)

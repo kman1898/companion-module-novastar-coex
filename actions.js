@@ -278,7 +278,7 @@ export default function (self) {
 				self.run('Preset', (api) => {
 					const [screenID, seq] = String(event.options.preset).split('|')
 					if (!screenID || seq === undefined) throw new Error('Choose a preset')
-					return api.applyPreset(Number(seq), screenID)
+					return api.applyPreset(Number(seq), self.resolveScreenId(screenID))
 				}),
 		},
 	}

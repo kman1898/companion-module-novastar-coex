@@ -130,6 +130,288 @@ export default function (self) {
 		group('status', 'Status', ['display_status', 'device_health', 'cabinet_status', 'connection']),
 	])
 
+	// ---------- All screens: hold-to-fire for the dangerous global actions ----------
+	presets.blackout_all_hold = {
+		type: 'simple',
+		name: 'Blackout ALL screens (hold 1 s)',
+		style: { text: 'BLACKOUT\nALL\n(hold)', size: '14', color: WHITE, bgcolor: combineRgb(90, 0, 0) },
+		steps: [
+			{
+				down: [],
+				up: [],
+				1000: { options: { runWhileHeld: true }, actions: [{ actionId: 'display_mode', options: { num: 1 } }] },
+			},
+		],
+		feedbacks: [
+			{ feedbackId: 'display_mode', options: { mode: 'Blackout', canvas: -1 }, style: { bgcolor: RED, color: WHITE } },
+		],
+	}
+	presets.normal_all = {
+		type: 'simple',
+		name: 'Normal ALL screens',
+		style: { text: 'NORMAL\nALL', size: '14', color: WHITE, bgcolor: GREY },
+		steps: [{ down: [{ actionId: 'display_mode', options: { num: 0 } }], up: [] }],
+		feedbacks: [
+			{
+				feedbackId: 'display_mode',
+				options: { mode: 'Normal', canvas: -1 },
+				style: { bgcolor: DARK_GREEN, color: WHITE },
+			},
+		],
+	}
+	section('all_screens', 'All screens', [group('all_screens', 'All screens', ['blackout_all_hold', 'normal_all'])])
+
+	// ---------- Per screen: the H Series style direct controls ----------
+	const screenGroups = []
+	self.screenChoices().forEach((screen, si) => {
+		const ids = []
+		const add = (key, preset) => {
+			const id = `screen_${si}_${key}`
+			presets[id] = preset
+			ids.push(id)
+		}
+		const name = `$(${self.label}:screen_${si}_name)`
+		const brightness = `$(${self.label}:screen_${si}_brightness_num)`
+
+		add('blackout', {
+			type: 'simple',
+			name: `${screen.label}: Blackout toggle`,
+			style: { text: `${name}\nBLACKOUT`, size: '14', color: WHITE, bgcolor: GREY },
+			steps: [{ down: [{ actionId: 'display_mode_screen_toggle', options: { screen: screen.id, mode: 1 } }], up: [] }],
+			feedbacks: [
+				{
+					feedbackId: 'display_mode_screen',
+					options: { screen: screen.id, mode: 1 },
+					style: { bgcolor: RED, color: WHITE },
+				},
+			],
+		})
+		add('freeze', {
+			type: 'simple',
+			name: `${screen.label}: Freeze toggle`,
+			style: { text: `${name}\nFREEZE`, size: '14', color: WHITE, bgcolor: GREY },
+			steps: [{ down: [{ actionId: 'display_mode_screen_toggle', options: { screen: screen.id, mode: 2 } }], up: [] }],
+			feedbacks: [
+				{
+					feedbackId: 'display_mode_screen',
+					options: { screen: screen.id, mode: 2 },
+					style: { bgcolor: BLUE, color: WHITE },
+				},
+			],
+		})
+
+		// Brightness ring: a native API 2.1 gauge reading the brightness variable, with
+		// a plain text fallback for hosts that cannot draw layered buttons.
+		add('brightness_ring', {
+			type: 'alternatives',
+			variants: [
+				{
+					type: 'layered',
+					name: `${screen.label}: Brightness ring`,
+					canvas: { decoration: 'none' },
+					elements: [
+						{
+							id: 'ring_group',
+							name: 'Ring',
+							type: 'group',
+							x: 0,
+							y: 0,
+							width: 100,
+							height: 100,
+							squareCoords: true,
+							children: [
+								{
+									id: 'brightness_gauge',
+									name: 'Brightness',
+									type: 'gauge',
+									x: 6,
+									y: 6,
+									width: 88,
+									height: 88,
+									min: 0,
+									max: 100,
+									value: { isExpression: true, value: brightness },
+									orientation: 'ring',
+									startAngle: 215,
+									endAngle: 145,
+									ringWidth: 15,
+									roundedEnds: true,
+									fillEnabled: true,
+									multiColour: true,
+									stops: [
+										{ value: 0, color: combineRgb(0, 45, 20), gradient: true },
+										{ value: 50, color: combineRgb(0, 150, 60), gradient: true },
+										{ value: 100, color: combineRgb(90, 255, 140), gradient: false },
+									],
+									trackStyle: 'dimmed',
+									trackAmount: 25,
+								},
+							],
+						},
+						{
+							id: 'value',
+							name: 'Value',
+							type: 'text',
+							x: 0,
+							y: 26,
+							width: 100,
+							height: 38,
+							text: { isExpression: true, value: `concat(${brightness}, "%")` },
+							fontsize: 100,
+							fontsizeAllowShrink: true,
+							color: WHITE,
+							halign: 'center',
+							valign: 'center',
+						},
+						{
+							id: 'label',
+							name: 'Label',
+							type: 'text',
+							x: 0,
+							y: 64,
+							width: 100,
+							height: 24,
+							text: name,
+							fontsize: 55,
+							fontsizeAllowShrink: true,
+							color: WHITE,
+							halign: 'center',
+							valign: 'center',
+						},
+					],
+					steps: NO_STEPS,
+					feedbacks: [],
+				},
+				{
+					type: 'simple',
+					name: `${screen.label}: Brightness`,
+					style: { text: `${name}\n${brightness}%`, size: 'auto', color: WHITE, bgcolor: BLACK },
+					steps: NO_STEPS,
+					feedbacks: [],
+				},
+			],
+		})
+
+		// Hold to ramp: one step on press, then keeps going until released
+		add('bright_up', {
+			type: 'simple',
+			name: `${screen.label}: Brightness + (hold to ramp)`,
+			style: { text: `${name}\nBRT +\n${brightness}%`, size: '14', color: WHITE, bgcolor: GREY },
+			steps: [
+				{
+					down: [{ actionId: 'brightness_ramp_up', options: { screen: screen.id, step: 1, ms: 120 } }],
+					up: [{ actionId: 'brightness_ramp_stop', options: { screen: screen.id } }],
+				},
+			],
+			feedbacks: [],
+		})
+		add('bright_down', {
+			type: 'simple',
+			name: `${screen.label}: Brightness - (hold to ramp)`,
+			style: { text: `${name}\nBRT -\n${brightness}%`, size: '14', color: WHITE, bgcolor: GREY },
+			steps: [
+				{
+					down: [{ actionId: 'brightness_ramp_down', options: { screen: screen.id, step: 1, ms: 120 } }],
+					up: [{ actionId: 'brightness_ramp_stop', options: { screen: screen.id } }],
+				},
+			],
+			feedbacks: [],
+		})
+
+		// Fixed levels, lit when the screen is at that level
+		for (let level = 100; level >= 0; level -= 10) {
+			add(`level_${level}`, {
+				type: 'simple',
+				name: `${screen.label}: Brightness ${level} %`,
+				style: { text: `${name}\n${level}%`, size: '14', color: WHITE, bgcolor: GREY },
+				steps: [{ down: [{ actionId: 'brightness_screen', options: { screen: screen.id, value: level } }], up: [] }],
+				feedbacks: [
+					{
+						feedbackId: 'brightness_compare',
+						options: { screen: screen.id, op: 'eq', value: level },
+						style: { bgcolor: combineRgb(0, 110, 50), color: WHITE },
+					},
+				],
+			})
+		}
+		screenGroups.push(group(`screen_${si}`, screen.label, ids))
+	})
+	section('screens', 'Screens', screenGroups)
+
+	// ---------- Test patterns, each button in its own colour ----------
+	const tpIds = []
+	const tp = (key, label, mode, rgb, bg, fg = WHITE) => {
+		const id = `testpattern_${key}`
+		presets[id] = {
+			type: 'simple',
+			name: `Test pattern: ${label}`,
+			style: { text: label, size: '14', color: fg, bgcolor: bg },
+			steps: [
+				{
+					down: [
+						{
+							actionId: 'testpattern',
+							options: {
+								mode,
+								red: rgb[0],
+								green: rgb[1],
+								blue: rgb[2],
+								gray: 255,
+								gridWidth: 255,
+								moveSpeed: 100,
+								gradientStretch: 1,
+							},
+						},
+					],
+					up: [],
+				},
+			],
+			feedbacks: [],
+		}
+		tpIds.push(id)
+	}
+	const FULL = 4095
+	tp('red', 'Red', 0, [FULL, 0, 0], combineRgb(200, 0, 0))
+	tp('green', 'Green', 0, [0, FULL, 0], combineRgb(0, 170, 0))
+	tp('blue', 'Blue', 0, [0, 0, FULL], combineRgb(0, 60, 220))
+	tp('white', 'White', 0, [FULL, FULL, FULL], WHITE, BLACK)
+	tp('black', 'Black', 0, [0, 0, 0], BLACK)
+	tp('grid', 'Grid', 20, [FULL, FULL, FULL], combineRgb(60, 60, 60))
+	tp('hlines', 'Lines H', 16, [FULL, FULL, FULL], combineRgb(60, 60, 60))
+	tp('vlines', 'Lines V', 17, [FULL, FULL, FULL], combineRgb(60, 60, 60))
+	tp('grey_grad', 'Grey ramp', 35, [FULL, FULL, FULL], combineRgb(110, 110, 110))
+	presets.testpattern_off = {
+		type: 'simple',
+		name: 'Test pattern off',
+		style: { text: 'TEST\nOFF', size: '14', color: WHITE, bgcolor: GREY },
+		steps: [{ down: [{ actionId: 'testpattern_off', options: {} }], up: [] }],
+		feedbacks: [{ feedbackId: 'test_pattern_active', options: {}, style: { bgcolor: ORANGE, color: BLACK } }],
+	}
+	tpIds.push('testpattern_off')
+
+	const rxIds = []
+	const rx = (key, label, mode, bg, fg = WHITE) => {
+		const id = `cabinet_pattern_${key}`
+		presets[id] = {
+			type: 'simple',
+			name: `Cabinet pattern: ${label}`,
+			style: { text: `CAB\n${label}`, size: '14', color: fg, bgcolor: bg },
+			steps: [{ down: [{ actionId: 'cabinet_test_pattern', options: { cabinets: '', mode } }], up: [] }],
+			feedbacks: [],
+		}
+		rxIds.push(id)
+	}
+	rx('red', 'Red', 4, combineRgb(200, 0, 0))
+	rx('green', 'Green', 5, combineRgb(0, 170, 0))
+	rx('blue', 'Blue', 6, combineRgb(0, 60, 220))
+	rx('white', 'White', 7, WHITE, BLACK)
+	rx('grey', 'Greyscale', 12, combineRgb(110, 110, 110))
+	rx('off', 'Normal', 1, GREY)
+	section('test_patterns', 'Test patterns', [
+		group('sending', 'Sending card (whole output)', tpIds),
+		group('cabinets', 'Cabinets (receiving cards)', rxIds),
+	])
+
 	// ---------- Inputs (Send-Only mode): switch to it, green with signal ----------
 	const inputIds = []
 	;(self.inputs || []).forEach((input, i) => {

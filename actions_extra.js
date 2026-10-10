@@ -105,36 +105,107 @@ export default function (self) {
 			],
 			callback: (e) =>
 				self.run('Display mode', (api) =>
-					api.displayMode(Number(e.options.mode), e.options.screen === 'all' ? [] : [e.options.screen]),
+					api.displayMode(
+						Number(e.options.mode),
+						e.options.screen === 'all' ? [] : [self.resolveScreenId(e.options.screen)],
+					),
 				),
+		},
+
+		display_mode_screen_toggle: {
+			name: 'Blackout / Freeze toggle (per screen)',
+			description: 'Toggles a screen between Normal and Blackout (or Freeze), based on its state on the controller',
+			options: [
+				screenOpt(),
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Toggle',
+					default: 1,
+					choices: [
+						{ id: 1, label: 'Blackout' },
+						{ id: 2, label: 'Freeze' },
+					],
+				},
+			],
+			callback: (e) =>
+				self.run('Display mode toggle', async (api) => {
+					const mode = Number(e.options.mode)
+					const ids = self.resolveScreens(e.options.screen)
+					// One shared decision so several screens toggle together
+					const anyOn = ids.some((id) => self.screenDisplayMode(id) === mode)
+					await api.displayMode(anyOn ? 0 : mode, e.options.screen === 'all' ? [] : ids)
+				}),
 		},
 
 		brightness_screen: {
 			name: 'Brightness (per screen)',
-			options: [screenOpt(), { id: 'value', type: 'number', label: 'Brightness %', default: 100, min: 0, max: 100 }],
+			options: [
+				screenOpt(),
+				{ id: 'value', type: 'number', label: 'Brightness %', default: 100, min: 0, max: 100, clampValues: true },
+			],
 			callback: (e) =>
 				self.run('Brightness', (api) =>
-					api.brightness(Number(e.options.value) / 100, self.resolveScreens(e.options.screen)),
+					self.setBrightness(api, Number(e.options.value) / 100, self.resolveScreens(e.options.screen)),
 				),
 		},
 
 		brightness_step: {
 			name: 'Brightness up/down (step)',
-			description: 'Changes the brightness relative to the current value',
+			description: 'Changes the brightness relative to the current value (quick presses add up correctly)',
 			options: [
 				screenOpt(),
-				{ id: 'step', type: 'number', label: 'Step % (negative = darker)', default: 5, min: -100, max: 100 },
+				{
+					id: 'step',
+					type: 'number',
+					label: 'Step % (negative = darker)',
+					default: 5,
+					min: -100,
+					max: 100,
+					clampValues: true,
+				},
 			],
 			callback: (e) =>
-				self.run('Brightness step', async (api) => {
-					const ids = self.resolveScreens(e.options.screen)
-					for (const id of ids) {
-						const p = (self.displayParams || []).find((x) => x.screenId === id) || self.displayParams?.[0]
-						const cur = Math.round((p?.brightness ?? 0) * 100)
-						const next = Math.max(0, Math.min(100, cur + Number(e.options.step)))
-						await api.brightness(next / 100, [id])
-					}
-				}),
+				self.run('Brightness step', (api) =>
+					self.stepBrightness(api, self.resolveScreens(e.options.screen), Number(e.options.step)),
+				),
+		},
+
+		brightness_ramp_up: {
+			name: 'Brightness ramp up (hold)',
+			description: 'Put on the button DOWN action; put "Brightness ramp stop" on UP. Steps until released or 100 %.',
+			options: [
+				screenOpt(),
+				{ id: 'step', type: 'number', label: 'Step %', default: 1, min: 1, max: 25, clampValues: true },
+				{ id: 'ms', type: 'number', label: 'Every (ms)', default: 120, min: 50, max: 2000, clampValues: true },
+			],
+			callback: (e) => {
+				if (!self.api) return
+				self.startRamp(self.resolveScreens(e.options.screen), Math.abs(Number(e.options.step)), Number(e.options.ms))
+			},
+		},
+
+		brightness_ramp_down: {
+			name: 'Brightness ramp down (hold)',
+			description: 'Put on the button DOWN action; put "Brightness ramp stop" on UP. Steps until released or 0 %.',
+			options: [
+				screenOpt(),
+				{ id: 'step', type: 'number', label: 'Step %', default: 1, min: 1, max: 25, clampValues: true },
+				{ id: 'ms', type: 'number', label: 'Every (ms)', default: 120, min: 50, max: 2000, clampValues: true },
+			],
+			callback: (e) => {
+				if (!self.api) return
+				self.startRamp(self.resolveScreens(e.options.screen), -Math.abs(Number(e.options.step)), Number(e.options.ms))
+			},
+		},
+
+		brightness_ramp_stop: {
+			name: 'Brightness ramp stop',
+			options: [screenOpt()],
+			callback: (e) => {
+				self.stopRamp(self.resolveScreens(e.options.screen).join(','))
+				setTimeout(() => self.pollAll(true).catch(() => {}), 300)
+			},
 		},
 
 		colortemp_screen: {
@@ -271,7 +342,9 @@ export default function (self) {
 				self.run('Layer source', (api) => {
 					const [screenID, layerId] = String(e.options.layer).split('|')
 					if (!screenID || layerId === undefined) throw new Error('Choose a screen/layer')
-					return api.layerSource(screenID, [{ id: Number(layerId), source: Number(e.options.source) }])
+					return api.layerSource(self.resolveScreenId(screenID), [
+						{ id: Number(layerId), source: Number(e.options.source) },
+					])
 				}),
 		},
 
@@ -365,7 +438,10 @@ export default function (self) {
 					],
 				},
 			],
-			callback: (e) => self.run('Backup verify', (api) => api.backupVerify(e.options.screen, Number(e.options.type))),
+			callback: (e) =>
+				self.run('Backup verify', (api) =>
+					api.backupVerify(self.resolveScreenId(e.options.screen), Number(e.options.type)),
+				),
 		},
 
 		// ================= Inputs =================
